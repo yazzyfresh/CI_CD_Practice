@@ -1,5 +1,3 @@
-name: Banking App CI
-
 on:
   push:
     branches: [main,master]
@@ -13,6 +11,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci_root_password
+          MYSQL_DATABASE: banking_app
+          MYSQL_USER: banking_ci
+          MYSQL_PASSWORD: ci_password
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    env:
+      CI_DB_URL: jdbc:mysql://127.0.0.1:3307/banking_app?useSSL=false&allowPublicKeyRetrieval=true
+      CI_DB_USERNAME: banking_ci
+      CI_DB_PASSWORD: ci_password
+
     steps:
       - name: Download repository code
         uses: actions/checkout@v7
@@ -23,9 +42,18 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Test and build backend with H2
+      - name: Create database tables
+        env:
+          MYSQL_CONTAINER: ${{ job.services.mysql.id }}
+        run: |
+          docker exec -i \
+            -e MYSQL_PWD=ci_root_password \
+            "$MYSQL_CONTAINER" \
+            mysql --user=root < sql/Banking_Setup.sql
+
+      - name: Test and build backend with MySQL
         working-directory: backend
-        run: mvn --batch-mode clean verify -Dspring.profiles.active=test
+        run: mvn --batch-mode clean verify -Dspring.profiles.active=ci
 
       - name: Set up Node.js 22
         uses: actions/setup-node@v7
@@ -39,6 +67,18 @@ jobs:
       - name: Build React frontend
         working-directory: frontend
         run: npm run build
+
+      - name: Install browser test tool
+        working-directory: e2e
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Test full app in browser
+        working-directory: e2e
+        run: npm test
 
       - name: Save backend JAR
         uses: actions/upload-artifact@v7
@@ -61,3 +101,15 @@ jobs:
           name: backend-test-reports
           path: backend/target/surefire-reports/
           if-no-files-found: ignore
+
+      - name: Save browser report and video
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-evidence
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+            e2e/logs/
+          if-no-files-found: ignore
+          retention-days: 7
